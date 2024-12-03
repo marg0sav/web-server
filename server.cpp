@@ -21,14 +21,6 @@
 // Определения глобальных переменных
 int listenfd;
 int clients[MAX];
-std::map<std::string, std::string> headers;
-size_t payload_size = 0;
-
-// Реализация функции request_header
-std::string request_header(const std::string& name) {
-    auto it = headers.find(name);
-    return it != headers.end() ? it->second : "";
-}
 
 // Запуск сервера на порту `port`
 void startServer(const std::string& port) {
@@ -74,7 +66,7 @@ void startServer(const std::string& port) {
     freeaddrinfo(addrResults);
 
     // Переводим сокет в режим ожидания подключений
-    if (listen(listenfd, 1000000) != 0) {
+    if (listen(listenfd, 1000) != 0) {
         perror("listen() error");
         log_message(LOG_FILE, "listen() error");
         exit(1);
@@ -116,7 +108,7 @@ void daemonize() {
         close(fd);
     }
 
-    // Заменяем openlog на логирование в файл
+    // Логирование в файл
     log_message(LOG_FILE, "Daemon started");
 }
 
@@ -162,9 +154,6 @@ void route(int client_fd, const std::string& method, const std::string& uri, con
 
     // Обработка методов POST
     if (method == "POST") {
-        log_message(LOG_FILE, "Handling POST request.");
-        log_message(LOG_FILE, "URI: " + uri);
-        log_message(LOG_FILE, "Body: " + body);
 
         if (uri == "/uploads") {
             handlePostRequest(uri, body, headers, client_fd);
@@ -189,7 +178,7 @@ void respond(int client_fd) {
     	setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
         std::vector<char> buffer(65535); // Буфер для получения запроса
         int received = recv(client_fd, buffer.data(), buffer.size() - 1, 0); // Получение данных от клиента
-        log_message(LOG_FILE, "Raw buffer: " + std::string(buffer.data(), received));
+        //log_message(LOG_FILE, "Raw buffer: " + std::string(buffer.data(), received));
 
         if (received < 0) {
             log_message(LOG_FILE, "recv() error: Unable to read data.");
@@ -247,8 +236,8 @@ void respond(int client_fd) {
     if (method == "POST") {
         auto contentLengthIt = headers.find("Content-Length");
         if (contentLengthIt == headers.end()) {
-            log_message(LOG_FILE, "Missing Content-Length header in POST request.");
-            badRequest(client_fd);
+            log_message(LOG_FILE, "Empty POST request.");
+            okResponse(client_fd, "Empty POST request.", "text/plain");
             return;
         }
 
@@ -284,7 +273,7 @@ void respond(int client_fd) {
             return;
         }
 
-        log_message(LOG_FILE, "POST Request Body: " + body);
+        //log_message(LOG_FILE, "POST Request Body: " + body);
     }
         
     route(client_fd, method, uri, headers, body);
@@ -364,135 +353,79 @@ void handlePostRequest(const std::string& uri, const std::string& body, const st
     contentType.erase(contentType.find_last_not_of(" \t") + 1);
     std::transform(contentType.begin(), contentType.end(), contentType.begin(), ::tolower);
 
-    // Добавление проверки директории uploads
-    std::string dirPath = std::string(ROOT) + "/uploads";
-    struct stat info;
-
-    if (stat(dirPath.c_str(), &info) != 0) {
-        log_message(LOG_FILE, "Directory does not exist: " + dirPath);
-        internalServerError(client_fd);
-        return;
-    } else if (!(info.st_mode & S_IFDIR)) {
-        log_message(LOG_FILE, "Path exists but is not a directory: " + dirPath);
-        internalServerError(client_fd);
-        return;
-    } else {
-        log_message(LOG_FILE, "Directory exists and is accessible: " + dirPath);
-    }
-
-    // Проверка URI
     if (normalizedUri == "/uploads") {
         if (contentType.find("application/x-www-form-urlencoded") != std::string::npos) {
             // Сохранение текстовых данных
-            std::string filePath = dirPath + "/data.txt";
-            log_message(LOG_FILE, "Attempting to open file for writing: " + filePath);
+            std::ofstream file(std::string(ROOT) + "/uploads/data.txt", std::ios::app);
 
-            std::ofstream file(filePath, std::ios::app);
             if (!file) {
-                log_message(LOG_FILE, "Failed to open file: " + filePath);
+                log_message(LOG_FILE, "Failed to open file for writing.");
                 internalServerError(client_fd);
                 return;
             }
+
             file << body << "\n";
             file.close();
 
-            log_message(LOG_FILE, "Form data saved to: " + filePath);
+            log_message(LOG_FILE, "Form data saved to uploads/data.txt");
             okResponse(client_fd, "Data successfully uploaded and saved.\n", "text/plain");
-        } else if (contentType.find("application/json") != std::string::npos) {
-    log_message(LOG_FILE, "Processing JSON data");
+        } else if (contentType.find("multipart/form-data") != std::string::npos) {
+            log_message(LOG_FILE, "Processing multipart/form-data");
 
-    // Проверяем, является ли тело запроса корректным JSON
-    if (body.empty()) {
-        log_message(LOG_FILE, "Empty JSON body received.");
-        badRequest(client_fd);
-        return;
-    }
-
-    // Сохраняем JSON данные в файл
-    std::string filePath = std::string(ROOT) + "/uploads/data.json";
-    log_message(LOG_FILE, "Attempting to open file for writing JSON: " + filePath);
-
-    std::ofstream file(filePath, std::ios::app); // Используем append для добавления данных
-    if (!file) {
-        log_message(LOG_FILE, "Failed to open file: " + filePath);
-        internalServerError(client_fd);
-        return;
-    }
-
-    file << body << "\n"; // Записываем JSON-объект в файл
-    file.close();
-
-    log_message(LOG_FILE, "JSON data saved to: " + filePath);
-    okResponse(client_fd, "JSON data successfully uploaded and saved.", "application/json");
-    return;
-}else if (contentType.find("multipart/form-data") != std::string::npos) {
-    log_message(LOG_FILE, "Processing multipart/form-data");
-
-    // Парсинг boundary из заголовка
-    auto boundaryPos = contentType.find("boundary=");
-    if (boundaryPos == std::string::npos) {
-        log_message(LOG_FILE, "Boundary not found in Content-Type header.");
-        badRequest(client_fd);
-        return;
-    }
-
-    std::string boundary = "--" + contentType.substr(boundaryPos + 9); // Извлекаем boundary
-    std::string endBoundary = boundary + "--";
-
-    // Открытие файла для записи
-    std::string filename = dirPath + "/uploaded_file";
-    std::ofstream outFile(filename, std::ios::binary);
-    if (!outFile) {
-        log_message(LOG_FILE, "Failed to open file: " + filename);
-        internalServerError(client_fd);
-        return;
-    }
-
-    // Чтение данных из сокета
-    std::vector<char> buffer(65536); // Буфер размером 64 KB
-    size_t totalBytesRead = 0;
-    bool isBodyStarted = false;
-
-    while (true) {
-        ssize_t bytesRead = recv(client_fd, buffer.data(), buffer.size(), 0);
-        if (bytesRead < 0) {
-            log_message(LOG_FILE, "Error reading from socket.");
-            internalServerError(client_fd);
-            return;
-        } else if (bytesRead == 0) {
-            break; // Конец данных
-        }
-
-        totalBytesRead += bytesRead;
-        std::string data(buffer.data(), bytesRead);
-
-        // Если тело ещё не началось, ищем начало контента после первого \r\n\r\n
-        if (!isBodyStarted) {
-            size_t bodyStart = data.find("\r\n\r\n");
-            if (bodyStart != std::string::npos) {
-                isBodyStarted = true;
-                data = data.substr(bodyStart + 4); // Убираем заголовки
-            } else {
-                continue; // Заголовки ещё не закончились
+            auto boundaryPos = contentType.find("boundary=");
+            if (boundaryPos == std::string::npos) {
+                log_message(LOG_FILE, "Boundary not found in Content-Type header.");
+                badRequest(client_fd);
+                return;
             }
-        }
 
-        // Проверяем конец данных (boundary)
-        size_t endBoundaryPos = data.find(endBoundary);
-        if (endBoundaryPos != std::string::npos) {
-            data = data.substr(0, endBoundaryPos); // Оставляем данные до endBoundary
-            outFile.write(data.data(), data.size());
-            break; // Достигли конца
-        }
+            std::string boundary = "--" + contentType.substr(boundaryPos + 9);
+            log_message(LOG_FILE, "Extracted boundary: " + boundary);
 
-        // Записываем данные в файл
-        outFile.write(data.data(), data.size());
-    }
+            // Поиск boundary в теле
+            size_t currentPos = body.find(boundary);
+            if (currentPos == std::string::npos) {
+                log_message(LOG_FILE, "Boundary not found in request body.");
+                badRequest(client_fd);
+                return;
+            }
 
-    outFile.close();
-    log_message(LOG_FILE, "File saved to: " + filename);
-    okResponse(client_fd, "File successfully uploaded and saved.", "text/plain");
-} else {
+            currentPos += boundary.size() + 2; // Пропускаем boundary и \r\n
+
+            // Остальная обработка multipart данных
+            size_t headerEnd = body.find("\r\n\r\n", currentPos);
+            if (headerEnd == std::string::npos) {
+                log_message(LOG_FILE, "Headers not properly terminated in multipart data.");
+                badRequest(client_fd);
+                return;
+            }
+
+            headerEnd += 4; // Пропускаем \r\n\r\n
+            size_t contentEnd = body.find(boundary, headerEnd);
+            if (contentEnd == std::string::npos) {
+                log_message(LOG_FILE, "File data not properly terminated with boundary.");
+                badRequest(client_fd);
+                return;
+            }
+
+            size_t fileDataEnd = contentEnd - 2;
+            std::string fileData = body.substr(headerEnd, fileDataEnd - headerEnd);
+
+            // Сохранение файла
+            std::string filename = std::string(ROOT) + "/uploads/uploaded_file";
+            std::ofstream file(filename, std::ios::binary);
+            if (!file) {
+                log_message(LOG_FILE, "Failed to open file for writing.");
+                internalServerError(client_fd);
+                return;
+            }
+
+            file.write(fileData.data(), fileData.size());
+            file.close();
+
+            log_message(LOG_FILE, "File saved to uploads/uploaded_file");
+            okResponse(client_fd, "File successfully uploaded and saved.", "text/plain");
+        } else {
             log_message(LOG_FILE, "Unsupported Content-Type: " + contentType);
             badRequest(client_fd);
         }
@@ -502,4 +435,3 @@ void handlePostRequest(const std::string& uri, const std::string& body, const st
     // Если URI не поддерживается
     notFound(client_fd, normalizedUri);
 }
-
