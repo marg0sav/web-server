@@ -340,7 +340,7 @@ void okResponse(int client_fd, const std::string& content, const std::string& co
 }
 
 void handlePostRequest(const std::string& uri, const std::string& body, const std::map<std::string, std::string>& headers, int client_fd) {
-    // Нормализация URI
+    // Нормализация URI (можно оставить)
     std::string normalizedUri = uri;
     normalizedUri.erase(0, normalizedUri.find_first_not_of(" \t"));
     normalizedUri.erase(normalizedUri.find_last_not_of(" \t") + 1);
@@ -351,7 +351,6 @@ void handlePostRequest(const std::string& uri, const std::string& body, const st
     std::string contentType = contentTypeIt != headers.end() ? contentTypeIt->second : "";
     contentType.erase(0, contentType.find_first_not_of(" \t"));
     contentType.erase(contentType.find_last_not_of(" \t") + 1);
-    std::transform(contentType.begin(), contentType.end(), contentType.begin(), ::tolower);
 
     if (normalizedUri == "/uploads") {
         if (contentType.find("application/x-www-form-urlencoded") != std::string::npos) {
@@ -369,6 +368,32 @@ void handlePostRequest(const std::string& uri, const std::string& body, const st
 
             log_message(LOG_FILE, "Form data saved to uploads/data.txt");
             okResponse(client_fd, "Data successfully uploaded and saved.\n", "text/plain");
+        } else if (contentType.find("application/json") != std::string::npos) {
+            log_message(LOG_FILE, "Processing JSON data");
+
+            // Проверяем, является ли тело запроса корректным JSON
+            if (body.empty()) {
+                log_message(LOG_FILE, "Empty JSON body received.");
+                badRequest(client_fd);
+                return;
+            }
+
+            // Сохраняем JSON данные в файл
+            std::string filePath = std::string(ROOT) + "/uploads/data.json";
+
+            std::ofstream file(filePath, std::ios::app); // Используем append для добавления данных
+            if (!file) {
+                log_message(LOG_FILE, "Failed to open file: " + filePath);
+                internalServerError(client_fd);
+                return;
+            }
+
+            file << body << "\n"; // Записываем JSON-объект в файл
+            file.close();
+
+            log_message(LOG_FILE, "JSON data saved to: " + filePath);
+            okResponse(client_fd, "JSON data successfully uploaded and saved.", "application/json");
+            return;
         } else if (contentType.find("multipart/form-data") != std::string::npos) {
             log_message(LOG_FILE, "Processing multipart/form-data");
 
@@ -379,52 +404,64 @@ void handlePostRequest(const std::string& uri, const std::string& body, const st
                 return;
             }
 
+            // Извлечение boundary без изменения регистра
             std::string boundary = "--" + contentType.substr(boundaryPos + 9);
             log_message(LOG_FILE, "Extracted boundary: " + boundary);
 
-            // Поиск boundary в теле
-            size_t currentPos = body.find(boundary);
-            if (currentPos == std::string::npos) {
+            // Проверка: boundary существует в теле
+            if (body.find(boundary) == std::string::npos) {
                 log_message(LOG_FILE, "Boundary not found in request body.");
+                log_message(LOG_FILE, "Request Body: " + body);
                 badRequest(client_fd);
                 return;
             }
 
-            currentPos += boundary.size() + 2; // Пропускаем boundary и \r\n
+            size_t currentPos = body.find(boundary) + boundary.size() + 2; // Пропускаем boundary и \r\n
 
-            // Остальная обработка multipart данных
-            size_t headerEnd = body.find("\r\n\r\n", currentPos);
-            if (headerEnd == std::string::npos) {
-                log_message(LOG_FILE, "Headers not properly terminated in multipart data.");
-                badRequest(client_fd);
-                return;
+            // Обработка частей multipart
+            while (true) {
+                size_t headerEnd = body.find("\r\n\r\n", currentPos);
+                if (headerEnd == std::string::npos) {
+                    log_message(LOG_FILE, "Headers not properly terminated in multipart data.");
+                    badRequest(client_fd);
+                    return;
+                }
+
+                size_t partStart = headerEnd + 4; // Пропускаем \r\n\r\n
+                size_t partEnd = body.find(boundary, partStart);
+                if (partEnd == std::string::npos) {
+                    log_message(LOG_FILE, "Boundary not found after part data.");
+                    badRequest(client_fd);
+                    return;
+                }
+
+                size_t fileDataEnd = partEnd - 2; // Убираем завершающий \r\n
+                std::string partData = body.substr(partStart, fileDataEnd - partStart);
+
+                // Сохраняем файл
+                std::string filename = std::string(ROOT) + "/uploads/uploaded_file_" + std::to_string(currentPos);
+                std::ofstream file(filename, std::ios::binary);
+                if (!file) {
+                    log_message(LOG_FILE, "Failed to open file for writing.");
+                    internalServerError(client_fd);
+                    return;
+                }
+
+                file.write(partData.data(), partData.size());
+                file.close();
+
+                log_message(LOG_FILE, "File saved to " + filename);
+
+                // Проверка, есть ли ещё части
+                currentPos = partEnd + boundary.size();
+                if (body.substr(currentPos, 2) == "--") {
+                    log_message(LOG_FILE, "End of multipart data.");
+                    break;
+                }
+                currentPos += 2; // Пропускаем \r\n
             }
 
-            headerEnd += 4; // Пропускаем \r\n\r\n
-            size_t contentEnd = body.find(boundary, headerEnd);
-            if (contentEnd == std::string::npos) {
-                log_message(LOG_FILE, "File data not properly terminated with boundary.");
-                badRequest(client_fd);
-                return;
-            }
-
-            size_t fileDataEnd = contentEnd - 2;
-            std::string fileData = body.substr(headerEnd, fileDataEnd - headerEnd);
-
-            // Сохранение файла
-            std::string filename = std::string(ROOT) + "/uploads/uploaded_file";
-            std::ofstream file(filename, std::ios::binary);
-            if (!file) {
-                log_message(LOG_FILE, "Failed to open file for writing.");
-                internalServerError(client_fd);
-                return;
-            }
-
-            file.write(fileData.data(), fileData.size());
-            file.close();
-
-            log_message(LOG_FILE, "File saved to uploads/uploaded_file");
-            okResponse(client_fd, "File successfully uploaded and saved.", "text/plain");
+            okResponse(client_fd, "File(s) successfully uploaded and saved.", "text/plain");
         } else {
             log_message(LOG_FILE, "Unsupported Content-Type: " + contentType);
             badRequest(client_fd);
