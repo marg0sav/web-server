@@ -404,21 +404,18 @@ void handlePostRequest(const std::string& uri, const std::string& body, const st
                 return;
             }
 
-            // Извлечение boundary без изменения регистра
             std::string boundary = "--" + contentType.substr(boundaryPos + 9);
             log_message(LOG_FILE, "Extracted boundary: " + boundary);
 
-            // Проверка: boundary существует в теле
             if (body.find(boundary) == std::string::npos) {
-                log_message(LOG_FILE, "Boundary not found in request body.");
                 log_message(LOG_FILE, "Request Body: " + body);
+                log_message(LOG_FILE, "Boundary not found in request body.");
                 badRequest(client_fd);
                 return;
             }
 
             size_t currentPos = body.find(boundary) + boundary.size() + 2; // Пропускаем boundary и \r\n
 
-            // Обработка частей multipart
             while (true) {
                 size_t headerEnd = body.find("\r\n\r\n", currentPos);
                 if (headerEnd == std::string::npos) {
@@ -430,15 +427,21 @@ void handlePostRequest(const std::string& uri, const std::string& body, const st
                 size_t partStart = headerEnd + 4; // Пропускаем \r\n\r\n
                 size_t partEnd = body.find(boundary, partStart);
                 if (partEnd == std::string::npos) {
+                    log_message(LOG_FILE, "Request Body: " + body);
                     log_message(LOG_FILE, "Boundary not found after part data.");
                     badRequest(client_fd);
                     return;
                 }
 
+                // Проверка завершающей границы
+                if (body.substr(partEnd, boundary.size() + 2) == boundary + "--") {
+                    log_message(LOG_FILE, "End of multipart data.");
+                    break; // Завершающая граница найдена
+                }
+
                 size_t fileDataEnd = partEnd - 2; // Убираем завершающий \r\n
                 std::string partData = body.substr(partStart, fileDataEnd - partStart);
 
-                // Сохраняем файл
                 std::string filename = std::string(ROOT) + "/uploads/uploaded_file_" + std::to_string(currentPos);
                 std::ofstream file(filename, std::ios::binary);
                 if (!file) {
@@ -449,20 +452,37 @@ void handlePostRequest(const std::string& uri, const std::string& body, const st
 
                 file.write(partData.data(), partData.size());
                 file.close();
-
                 log_message(LOG_FILE, "File saved to " + filename);
 
-                // Проверка, есть ли ещё части
-                currentPos = partEnd + boundary.size();
-                if (body.substr(currentPos, 2) == "--") {
-                    log_message(LOG_FILE, "End of multipart data.");
-                    break;
-                }
-                currentPos += 2; // Пропускаем \r\n
+                currentPos = partEnd + boundary.size() + 2; // Пропускаем boundary и \r\n
             }
 
             okResponse(client_fd, "File(s) successfully uploaded and saved.", "text/plain");
-        } else {
+        }else if (contentType.find("image/jpeg") != std::string::npos) {
+            log_message(LOG_FILE, "Processing image/jpeg data");
+
+            // Сохраняем изображение в папке uploads/images
+            std::string imagePath = std::string(ROOT) + "/uploads/images";
+            struct stat info;
+
+            // Создаём уникальное имя файла
+            std::string filename = imagePath + "/image_" + std::to_string(time(nullptr)) + ".jpeg";
+
+            // Сохраняем изображение
+            std::ofstream file(filename, std::ios::binary);
+            if (!file) {
+                log_message(LOG_FILE, "Failed to open file for writing: " + filename);
+                internalServerError(client_fd);
+                return;
+            }
+
+            file.write(body.data(), body.size());
+            file.close();
+
+            log_message(LOG_FILE, "Image successfully saved to: " + filename);
+            okResponse(client_fd, "Image successfully uploaded and saved.", "text/plain");
+        } 
+        else {
             log_message(LOG_FILE, "Unsupported Content-Type: " + contentType);
             badRequest(client_fd);
         }
